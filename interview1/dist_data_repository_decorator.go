@@ -3,6 +3,7 @@ package interview1
 import (
 	"context"
 	"log"
+	"sync"
 )
 
 type DistDataRepositoryDecorator struct {
@@ -18,35 +19,46 @@ func (it *DistDataRepositoryDecorator) Get(ctx context.Context, addresses []stri
 		return "", ctx.Err()
 	}
 
-	resultChannel := make(chan string)
-	defer close(resultChannel)
+	resultChannel := make(chan string, len(addresses))
+	var wg sync.WaitGroup
 
 	for i, address := range addresses {
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
+
 			log.Printf("Started gorouting #%d", i)
 			defer log.Printf("Finished gorouting #%d", i)
 
 			value, err := it.dataRepository.Get(ctx, address, key)
 			if err != nil {
-				log.Printf(err.Error()+" gorouting #%d", i)
+				log.Printf("Error in goroutine #%d: %v", i, err)
 				return
 			}
-			defer func() {
-				err := recover()
-				if err != nil {
-					log.Printf("Failed to send to closed channel #%d", i)
-				}
-			}()
 
-			resultChannel <- value
+			select {
+			case resultChannel <- value:
+				log.Printf("Successfully sent to channel by goroutine #%d", i)
+			case <-ctx.Done():
+				log.Printf("Context canceled, goroutine #%d", i)
+			}
 		}()
 	}
 
-	log.Printf("Waiting result in main...")
+	go func() {
+		wg.Wait()
+		close(resultChannel)
+	}()
+
+	log.Printf("Waiting for result in main...")
 	select {
-	case result := <-resultChannel:
-		log.Printf("Result was gotten: %s", result)
-		return result, nil
+	case result, ok := <-resultChannel:
+		if ok {
+			log.Printf("Result received: %s", result)
+			return result, nil
+		}
+		log.Printf("Channel closed without results")
+		return "", nil
 	case <-ctx.Done():
 		log.Printf("Operation interrupted")
 		return "", ctx.Err()
